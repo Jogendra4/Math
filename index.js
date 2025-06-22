@@ -1,16 +1,18 @@
-// FINAL - index.js for Vercel Deployment
+// FINAL, ROBUST index.js for Vercel Deployment
 
-const express = require('express');
 const http = require('http');
-const socketIo = require('socket.io');
+const { Server } = require('socket.io');
 const { Redis } = require('@upstash/redis');
 
-const app = express();
-const server = http.createServer(app);
-const io = socketIo(server);
+// --- Initialize Redis Client ---
+// Vercel automatically provides these environment variables after the integration.
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
 
-// --- HTML Template (The entire frontend is in this string) ---
-const htmlTemplate = `
+// --- HTML Template ---
+const html = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -33,23 +35,19 @@ const htmlTemplate = `
         .screen.active { display: flex; }
         .card { background: var(--surface-color); border-radius: var(--border-radius); box-shadow: var(--shadow); padding: var(--space-m); width: 100%; max-width: 550px; text-align: center; }
         .btn { border: none; border-radius: 12px; padding: 0.8rem 1.6rem; font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.25s ease; color: white; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); box-shadow: 0 4px 15px rgba(2, 136, 209, 0.3); }
-        .btn:hover { transform: translateY(-3px); box-shadow: 0 7px 20px rgba(2, 136, 209, 0.4); }
         h1 { font-size: clamp(1.8rem, 5vw, 2.5rem); color: var(--primary-color); }
         #login-form { display: flex; flex-direction: column; gap: var(--space-m); margin-top: var(--space-m); }
         #username-input { padding: var(--space-m); border-radius: 12px; border: 1px solid #ddd; font-size: 1rem; text-align: center; }
         .players-list { display: flex; flex-direction: column; gap: 10px; margin: 20px 0; width: 100%; }
         .player-card { display: flex; align-items: center; gap: 15px; background: #f7f7f7; padding: 10px 15px; border-radius: 10px; }
-        .player-card i { color: var(--secondary-color); }
         #lobby-status { font-weight: 600; }
         .loader-dots { display: flex; justify-content: center; gap: 10px; margin-top: 15px; }
         .loader-dots div { width: 12px; height: 12px; background-color: var(--secondary-color); border-radius: 50%; animation: bounce 1.4s infinite ease-in-out both; }
-        .loader-dots div:nth-child(1) { animation-delay: -0.32s; } .loader-dots div:nth-child(2) { animation-delay: -0.16s; }
+        .loader-dots div:nth-child(1) { animation-delay: -0.32s; }
         @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1.0); } }
         #quiz-screen { width: 100%; max-width: 700px; gap: var(--space-m); }
         .opponent-container { display: flex; justify-content: space-around; width: 100%; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
         .opponent { background: #fff; padding: 5px 10px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); text-align: center; flex: 1; min-width: 80px; }
-        .opponent-name { font-size: 0.8rem; font-weight: 600; }
-        .opponent-score { font-size: 1rem; color: var(--primary-color); font-weight: 700; }
         .countdown-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); display: none; place-items: center; z-index: 100; color: white; font-size: 10rem; font-weight: 700; }
         .countdown-overlay.active { display: grid; }
         #question-card { min-height: 150px; display: grid; place-items: center; }
@@ -77,7 +75,7 @@ const htmlTemplate = `
     </div>
     <script src="/socket.io/socket.io.js"></script>
     <script>
-        const socket = io(window.location.origin);
+        const socket = io(window.location.origin, { transports: ["websocket"] });
         const LOBBY_SIZE = 2;
         let myUsername = '', currentLobbyId = null, quizQuestions = [], currentQuestionIndex = 0, myScore = 0;
         const screens = { login: document.getElementById('login-screen'), lobby: document.getElementById('lobby-screen'), quiz: document.getElementById('quiz-screen'), results: document.getElementById('results-screen') };
@@ -103,6 +101,7 @@ const htmlTemplate = `
             }
         });
         DOMElements.playAgainBtn.addEventListener('click', () => { resetClientState(); socket.emit('findMatch', myUsername); navigateTo('lobby'); });
+        socket.on('connect_error', (err) => { console.error("Connection Error:", err.message); });
         socket.on('joinedLobby', (l,p) => { currentLobbyId = l; updateLobbyUI(p); });
         socket.on('playerUpdate', (p) => { if(screens.lobby.classList.contains('active')) { updateLobbyUI(p); } else if (screens.quiz.classList.contains('active')) { updateOpponentProgress(p); } });
         socket.on('gameCountdown', c => { DOMElements.countdownOverlay.classList.add('active'); DOMElements.countdownTimer.textContent = c; });
@@ -119,109 +118,120 @@ const htmlTemplate = `
 </html>
 `;
 
-// This handler will serve the HTML page for the root URL, and also handle Socket.IO requests
-app.all('/*', (req, res) => {
-    // We attach the socket.io server to the existing http server
-    // but the actual routing is handled by the serverless function itself.
-    // The main purpose of this route is to serve the HTML.
-    res.send(htmlTemplate);
-});
 
-// --- Initialize Redis Client ---
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+// This is a special handler for Vercel's serverless environment.
+// It will handle all incoming requests.
+module.exports = async (request, response) => {
+    // We create an http server but we don't listen on a port.
+    // The serverless environment handles the port listening.
+    const server = http.createServer((req, res) => {
+        // For any standard HTTP request, we just serve the HTML page.
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(html);
+    });
 
-// --- Game State & Logic ---
-const LOBBY_CAPACITY = 2;
-function createLobbyId() { return Math.random().toString(36).substring(2, 8); }
-function generateQuestions(count = 10) {
-    const questions = [];
-    const operations = ['+', '-', '×', '÷'];
-    for (let i = 0; i < count; i++) {
-        let a, b, answer;
-        const op = operations[Math.floor(Math.random() * 4)];
-        switch (op) {
-            case '+': a = Math.floor(Math.random()*20)+1; b = Math.floor(Math.random()*20)+1; answer = a+b; questions.push({ text: `${a} + ${b} = ?`, answer }); break;
-            case '-': a = Math.floor(Math.random()*30)+10; b = Math.floor(Math.random()*a)+1; answer = a-b; questions.push({ text: `${a} - ${b} = ?`, answer }); break;
-            case '×': a = Math.floor(Math.random()*10)+2; b = Math.floor(Math.random()*10)+2; answer = a*b; questions.push({ text: `${a} × ${b} = ?`, answer }); break;
-            case '÷': answer = Math.floor(Math.random()*10)+2; b = Math.floor(Math.random()*10)+2; a = b*answer; questions.push({ text: `${a} ÷ ${b} = ?`, answer }); break;
+    const io = new Server(server, {
+        path: '/socket.io/',
+        cors: {
+            origin: '*', // Allow all origins for simplicity
         }
+    });
+
+    // --- Game State & Logic ---
+    const LOBBY_CAPACITY = 2;
+    function createLobbyId() { return Math.random().toString(36).substring(2, 8); }
+    function generateQuestions(count = 10) {
+        const questions = [];
+        const operations = ['+', '-', '×', '÷'];
+        for (let i = 0; i < count; i++) {
+            let a, b, answer;
+            const op = operations[Math.floor(Math.random() * 4)];
+            switch (op) {
+                case '+': a = Math.floor(Math.random()*20)+1; b = Math.floor(Math.random()*20)+1; answer = a+b; questions.push({ text: `${a} + ${b} = ?`, answer }); break;
+                case '-': a = Math.floor(Math.random()*30)+10; b = Math.floor(Math.random()*a)+1; answer = a-b; questions.push({ text: `${a} - ${b} = ?`, answer }); break;
+                case '×': a = Math.floor(Math.random()*10)+2; b = Math.floor(Math.random()*10)+2; answer = a*b; questions.push({ text: `${a} × ${b} = ?`, answer }); break;
+                case '÷': answer = Math.floor(Math.random()*10)+2; b = Math.floor(Math.random()*10)+2; a = b*answer; questions.push({ text: `${a} ÷ ${b} = ?`, answer }); break;
+            }
+        }
+        return questions;
     }
-    return questions;
-}
 
-// --- Socket.IO Event Handling with Redis---
-io.on('connection', (socket) => {
-    socket.on('findMatch', async (username) => {
-        socket.username = username;
-        let joined = false;
-        const lobbyIds = await redis.smembers('lobbies');
+    // --- Socket.IO Event Handling with Redis---
+    io.on('connection', (socket) => {
+        socket.on('findMatch', async (username) => {
+            socket.username = username;
+            let joined = false;
+            const lobbyIds = await redis.smembers('lobbies');
 
-        for (const lobbyId of lobbyIds) {
-            let lobby = await redis.get(`lobby:${lobbyId}`);
-            if (lobby && lobby.players.length < LOBBY_CAPACITY && !lobby.inGame) {
-                socket.join(lobbyId);
-                lobby.players.push({ id: socket.id, username, score: 0 });
-                await redis.set(`lobby:${lobbyId}`, lobby);
-                socket.emit('joinedLobby', lobbyId, lobby.players);
-                io.to(lobbyId).emit('playerUpdate', lobby.players);
-                joined = true;
-                if (lobby.players.length === LOBBY_CAPACITY) startGame(lobbyId);
-                break;
-            }
-        }
-
-        if (!joined) {
-            const lobbyId = createLobbyId();
-            socket.join(lobbyId);
-            const newLobby = { id: lobbyId, players: [{ id: socket.id, username, score: 0 }], questions: generateQuestions(), inGame: false };
-            await redis.sadd('lobbies', lobbyId);
-            await redis.set(`lobby:${lobbyId}`, newLobby);
-            socket.emit('joinedLobby', lobbyId, newLobby.players);
-        }
-    });
-    
-    socket.on('submitAnswer', async ({ lobbyId, isCorrect }) => {
-        let lobby = await redis.get(`lobby:${lobbyId}`);
-        if (!lobby) return;
-        const player = lobby.players.find(p => p.id === socket.id);
-        if (player && isCorrect) { player.score += 10; await redis.set(`lobby:${lobbyId}`, lobby); }
-        io.to(lobbyId).emit('playerUpdate', lobby.players);
-    });
-
-    socket.on('quizFinished', async (lobbyId) => {
-        let lobby = await redis.get(`lobby:${lobbyId}`);
-        if (!lobby) return;
-        const player = lobby.players.find(p => p.id === socket.id);
-        if (player) player.finished = true;
-        await redis.set(`lobby:${lobbyId}`, lobby);
-        if (lobby.players.every(p => p.finished)) endGame(lobbyId);
-    });
-
-    socket.on('disconnect', async () => {
-        const lobbyIds = await redis.smembers('lobbies');
-        for (const lobbyId of lobbyIds) {
-            let lobby = await redis.get(`lobby:${lobbyId}`);
-            if (!lobby) continue;
-            const playerIndex = lobby.players.findIndex(p => p.id === socket.id);
-            if (playerIndex !== -1) {
-                lobby.players.splice(playerIndex, 1);
-                if (lobby.players.length === 0) {
-                    await redis.del(`lobby:${lobbyId}`);
-                    await redis.srem('lobbies', lobbyId);
-                } else {
+            for (const lobbyId of lobbyIds) {
+                let lobby = await redis.get(`lobby:${lobbyId}`);
+                if (lobby && lobby.players.length < LOBBY_CAPACITY && !lobby.inGame) {
+                    socket.join(lobbyId);
+                    lobby.players.push({ id: socket.id, username, score: 0 });
                     await redis.set(`lobby:${lobbyId}`, lobby);
+                    socket.emit('joinedLobby', lobbyId, lobby.players);
                     io.to(lobbyId).emit('playerUpdate', lobby.players);
+                    joined = true;
+                    if (lobby.players.length === LOBBY_CAPACITY) startGame(lobbyId, io);
+                    break;
                 }
-                break;
             }
-        }
-    });
-});
 
-async function startGame(lobbyId) {
+            if (!joined) {
+                const lobbyId = createLobbyId();
+                socket.join(lobbyId);
+                const newLobby = { id: lobbyId, players: [{ id: socket.id, username, score: 0 }], questions: generateQuestions(), inGame: false };
+                await redis.sadd('lobbies', lobbyId);
+                await redis.set(`lobby:${lobbyId}`, newLobby);
+                socket.emit('joinedLobby', lobbyId, newLobby.players);
+            }
+        });
+        
+        socket.on('submitAnswer', async ({ lobbyId, isCorrect }) => {
+            let lobby = await redis.get(`lobby:${lobbyId}`);
+            if (!lobby) return;
+            const player = lobby.players.find(p => p.id === socket.id);
+            if (player && isCorrect) { player.score += 10; await redis.set(`lobby:${lobbyId}`, lobby); }
+            io.to(lobbyId).emit('playerUpdate', lobby.players);
+        });
+
+        socket.on('quizFinished', async (lobbyId) => {
+            let lobby = await redis.get(`lobby:${lobbyId}`);
+            if (!lobby) return;
+            const player = lobby.players.find(p => p.id === socket.id);
+            if (player) player.finished = true;
+            await redis.set(`lobby:${lobbyId}`, lobby);
+            if (lobby.players.every(p => p.finished)) endGame(lobbyId, io);
+        });
+
+        socket.on('disconnect', async () => {
+            const lobbyIds = await redis.smembers('lobbies');
+            for (const lobbyId of lobbyIds) {
+                let lobby = await redis.get(`lobby:${lobbyId}`);
+                if (!lobby) continue;
+                const playerIndex = lobby.players.findIndex(p => p.id === socket.id);
+                if (playerIndex !== -1) {
+                    lobby.players.splice(playerIndex, 1);
+                    if (lobby.players.length === 0) {
+                        await redis.del(`lobby:${lobbyId}`);
+                        await redis.srem('lobbies', lobbyId);
+                    } else {
+                        await redis.set(`lobby:${lobbyId}`, lobby);
+                        io.to(lobbyId).emit('playerUpdate', lobby.players);
+                    }
+                    break;
+                }
+            }
+        });
+    });
+
+    // This is the magic part for Vercel.
+    // It hijacks the request and response objects to handle the WebSocket upgrade.
+    io.attach(server);
+    server.emit('request', request, response);
+};
+
+async function startGame(lobbyId, io) {
     let lobby = await redis.get(`lobby:${lobbyId}`);
     if (!lobby) return;
     lobby.inGame = true;
@@ -234,7 +244,7 @@ async function startGame(lobbyId) {
     }, 1000);
 }
 
-async function endGame(lobbyId) {
+async function endGame(lobbyId, io) {
     let lobby = await redis.get(`lobby:${lobbyId}`);
     if (!lobby) return;
     const finalRanking = lobby.players.sort((a, b) => b.score - a.score);
@@ -243,18 +253,4 @@ async function endGame(lobbyId) {
         await redis.del(`lobby:${lobbyId}`);
         await redis.srem('lobbies', lobbyId);
     }, 15000);
-}
-
-// Attach the socket.io server to the http server
-io.attach(server);
-
-// Start the server only if not in a serverless environment (for local testing)
-if (!process.env.VERCEL) {
-    const PORT = process.env.PORT || 3000;
-    server.listen(PORT, () => {
-        console.log(`Server is live on port ${PORT}`);
-    });
-}
-
-// Export the server for Vercel
-module.exports = server;
+        }
